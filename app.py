@@ -382,6 +382,15 @@ else:
 
     df_exibir_final = df_exibir[colunas_finais].drop_duplicates()
 
+    # --- ORDENAÇÃO DECRESCENTE POR DATA ATUALIZAÇÃO ---
+    if "DATA ATUALIZAÇÃO" in df_exibir_final.columns and not df_exibir_final.empty:
+        # Cria coluna temporária em formato Datetime para ordenação correta por data
+        df_exibir_final["_temp_dt_ordem"] = pd.to_datetime(
+            df_exibir_final["DATA ATUALIZAÇÃO"], dayfirst=True, errors="coerce"
+        )
+        df_exibir_final = df_exibir_final.sort_values(by="_temp_dt_ordem", ascending=False, na_position="last")
+        df_exibir_final = df_exibir_final.drop(columns=["_temp_dt_ordem"])
+
     st.dataframe(
         df_exibir_final,
         use_container_width=True,
