@@ -41,20 +41,30 @@ def processar_planilhas(urls):
             doc = client.open_by_url(url)
             # Percorre todas as abas da planilha
             for worksheet in doc.worksheets():
-                records = worksheet.get_all_records()
-                if not records:
+                # 1. Pega todas as linhas brutas (evita o erro do header do gspread)
+                rows = worksheet.get_all_values()
+                if not rows or len(rows) < 2:  # Se estiver vazia ou só tiver cabeçalho
                     continue
 
-                df = pd.DataFrame(records)
+                # 2. Transforma em DataFrame usando a primeira linha como cabeçalho
+                header = [str(col).strip() for col in rows[0]]
+                df = pd.DataFrame(rows[1:], columns=header)
 
-                # Ajuste o nome das colunas se na planilha estiver levemente diferente
+                # 3. Trata e remove colunas vazias ou sem nome
+                df = df.loc[:, df.columns != ""]
+                df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
+
+                # 4. Remove colunas com nomes duplicados mantendo apenas a primeira
+                df = df.loc[:, ~df.columns.duplicated()]
+
+                # Ajuste dos nomes para busca
                 colunas_necessarias = ["Status", "Importador", "Digitador", "Data Atualização"]
                 
-                # Verifica se todas as colunas existem no DataFrame
+                # Verifica se todas as colunas necessárias estão presentes
                 if all(col in df.columns for col in colunas_necessarias):
-                    # Adiciona a identificação do documento/aba
                     df["Origem"] = f"{doc.title} - {worksheet.title}"
                     dados_totais.append(df)
+
         except Exception as err:
             st.warning(f"Não foi possível ler a planilha: {url}. Erro: {err}")
 
