@@ -43,7 +43,7 @@ def normalizar_texto(texto):
 def unificar_colunas_mesmo_nome(df):
     """
     Combina apenas as COLUNAS duplicadas da mesma aba (ex: STATUS_1, STATUS_2)
-    sem excluir nenhuma LINHA da planilha.
+    sem mexer nas LINHAS.
     """
     if df.empty:
         return df
@@ -165,8 +165,9 @@ def processar_planilhas_otimizado(urls):
                 dados_totais.append(df_filtrado)
 
     if dados_totais:
-        # Junta todas as abas e planilhas preservando 100% de todas as linhas (sem descarte de duplicatas)
-        return pd.concat(dados_totais, ignore_index=True, sort=False)
+        df_concat = pd.concat(dados_totais, ignore_index=True, sort=False)
+        # REMOVE APENAS LINHAS ONDE TODAS AS COLUNAS FOREM RIGOROSAMENTE IDÊNTICAS
+        return df_concat.drop_duplicates()
     return pd.DataFrame()
 
 # --- BARRA LATERAL (PAINEL DE CONTROLE) ---
@@ -228,7 +229,7 @@ else:
         return None
 
     def checar_referencia_valida(row):
-        """Considera válida qualquer linha que possua texto na coluna REFERÊNCIA (incluindo SEM REF)."""
+        """Aceita qualquer valor na coluna REFERÊNCIA (incluindo SEM REF)."""
         if "REFERÊNCIA" in row:
             val = str(row["REFERÊNCIA"]).strip().replace('"', '')
             return val != "" and val.lower() not in ["none", "nan", "null"]
@@ -255,14 +256,17 @@ else:
         if df.empty or col_fonte_data not in df.columns:
             return df
 
+        if opcao_periodo == "Todo o tempo":
+            return df
+
         datas_ref = df.apply(lambda r: extrair_data_ref(r, col_fonte_data), axis=1)
         mascara_data_valida = datas_ref.notnull()
 
-        if opcao_periodo != "Todo o tempo" and data_inicio and data_fim:
+        if data_inicio and data_fim:
             mascara_periodo = (datas_ref >= data_inicio) & (datas_ref <= data_fim)
             return df[mascara_data_valida & mascara_periodo]
 
-        return df[mascara_data_valida]
+        return df
 
     # 1. AGUARDANDO DIGITAÇÃO
     df_com_ref = df_completo[df_completo.apply(checar_referencia_valida, axis=1)]
@@ -293,6 +297,7 @@ else:
 
     st.markdown("---")
 
+    # SELEÇÃO PELO MENU LATERAL
     if status_selecionado == "AGUARDANDO DIGITAÇÃO":
         df_exibir = df_aguardando_filtrado
     elif status_selecionado == "EM DIGITAÇÃO":
@@ -304,17 +309,18 @@ else:
     else:
         df_exibir = pd.concat([df_aguardando_filtrado, df_em_dig_filtrado, df_digitado_filtrado, df_finalizado_filtrado], ignore_index=True)
 
-    txt_periodo = f"({data_inicio.strftime('%d/%m/%Y')} até {data_fim.strftime('%d/%m/%Y')})" if data_inicio and data_fim and opcao_periodo != "Todo o tempo" else "(Com data preenchida)"
+    txt_periodo = f"({data_inicio.strftime('%d/%m/%Y')} até {data_fim.strftime('%d/%m/%Y')})" if data_inicio and data_fim and opcao_periodo != "Todo o tempo" else ""
     st.subheader(f"📌 Registros - {status_selecionado} {txt_periodo}")
 
-    # Remove apenas linhas onde ABSOLUTAMENTE TODAS as colunas são nulas/vazias
-    df_exibir_clean = df_exibir.dropna(how="all")
-
+    # ORDENAÇÃO DE COLUNAS
     colunas_ordenadas = ["REFERÊNCIA", "IMPORTADOR", "DIGITADOR", "STATUS", "ENVIO P/ DIGITAÇÃO", "DATA ATUALIZAÇÃO", "ORIGEM"]
-    colunas_finais = [col for col in colunas_ordenadas if col in df_exibir_clean.columns]
+    colunas_finais = [col for col in colunas_ordenadas if col in df_exibir.columns]
+
+    # GARANTE QUE APENAS DUPLICATAS 100% IDÊNTICAS EM TODAS AS COLUNAS MENCIONADAS SEJAM DESECARTADAS
+    df_exibir_final = df_exibir[colunas_finais].drop_duplicates()
 
     st.dataframe(
-        df_exibir_clean[colunas_finais],
+        df_exibir_final,
         use_container_width=True,
         hide_index=True
     )
