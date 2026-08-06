@@ -45,10 +45,6 @@ def normalizar_texto(texto):
     return texto.strip().upper()
 
 def unificar_colunas_mesmo_nome(df):
-    """
-    Combina apenas as COLUNAS duplicadas da mesma aba (ex: STATUS_1, STATUS_2)
-    sem mexer nas LINHAS.
-    """
     if df.empty:
         return df
 
@@ -81,7 +77,6 @@ def unificar_colunas_mesmo_nome(df):
     return df_consolidado
 
 def processar_aba(sheet, sheet_id, headers, alvos):
-    """Processa uma aba individual de uma planilha."""
     title = sheet["properties"]["title"]
     sheet_id_gid = sheet["properties"]["sheetId"]
 
@@ -145,7 +140,6 @@ def processar_aba(sheet, sheet_id, headers, alvos):
     return None
 
 def processar_planilha_unica(url, headers, alvos):
-    """Obtém os metadados de uma planilha e processa suas abas em paralelo."""
     sheet_id = extrair_spreadsheet_id(url)
     meta_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}?fields=sheets.properties"
     try:
@@ -156,7 +150,6 @@ def processar_planilha_unica(url, headers, alvos):
         sheets_info = resp_meta.json().get("sheets", [])
         dfs_planilha = []
 
-        # Processamento paralelo de todas as abas da planilha
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(processar_aba, sheet, sheet_id, headers, alvos) for sheet in sheets_info]
             for future in as_completed(futures):
@@ -167,7 +160,6 @@ def processar_planilha_unica(url, headers, alvos):
     except Exception:
         return []
 
-# Cache de 120 segundos
 @st.cache_data(ttl=120, show_spinner=False)
 def processar_planilhas_otimizado(urls):
     dados_totais = []
@@ -184,7 +176,6 @@ def processar_planilhas_otimizado(urls):
         "ENVIO PARA DIGITACAO": "ENVIO P/ DIGITAÇÃO"
     }
 
-    # Processamento paralelo de TODAS as planilhas simultaneamente
     with ThreadPoolExecutor(max_workers=len(urls)) as executor:
         futures = [executor.submit(processar_planilha_unica, url, headers, alvos) for url in urls]
         for future in as_completed(futures):
@@ -194,32 +185,44 @@ def processar_planilhas_otimizado(urls):
 
     if dados_totais:
         df_concat = pd.concat(dados_totais, ignore_index=True, sort=False)
-        # REMOVE APENAS LINHAS ONDE TODAS AS COLUNAS FOREM RIGOROSAMENTE IDÊNTICAS
         return df_concat.drop_duplicates()
     return pd.DataFrame()
 
 # --- BARRA LATERAL (PAINEL DE CONTROLE) ---
 st.sidebar.header("⚙️ Painel de Controle")
 
-if st.sidebar.button("🔄 Recarregar Dados Agora"):
+# Callback para recarregar dados e resetar filtros no session_state
+def recarregar_e_resetar():
     st.cache_data.clear()
-    st.rerun()
+    st.session_state["filtro_status"] = "AGUARDANDO DIGITAÇÃO"
+    st.session_state["filtro_periodo"] = "Todo o tempo"
+    st.session_state["filtro_intervalo"] = (date.today() - timedelta(days=7), date.today())
 
-status_opcoes = ["AGUARDANDO DIGITAÇÃO", "EM DIGITAÇÃO", "DIGITADO", "FINALIZADO", "TODOS"]
-status_selecionado = st.sidebar.selectbox("Filtrar por Status:", status_opcoes, index=0)
+st.sidebar.button("🔄 Recarregar Dados Agora", on_click=recarregar_e_resetar, type="primary")
 
 st.sidebar.markdown("---")
 
-st.sidebar.subheader("📅 Período")
-opcao_periodo = st.sidebar.selectbox(
-    "Selecione o intervalo:",
-    ["Todo o tempo", "Hoje", "Últimos 7 dias", "Últimos 30 dias", "Este Mês", "Personalizado"],
-    index=0
-)
+# Formulário para agrupar os filtros e só aplicar após o clique do usuário
+with st.sidebar.form(key="form_filtros"):
+    st.subheader("🔍 Filtros de Busca")
+    
+    status_opcoes = ["AGUARDANDO DIGITAÇÃO", "EM DIGITAÇÃO", "DIGITADO", "FINALIZADO", "TODOS"]
+    status_selecionado = st.selectbox("Filtrar por Status:", status_opcoes, key="filtro_status")
 
+    opcao_periodo = st.selectbox(
+        "Selecione o intervalo:",
+        ["Todo o tempo", "Hoje", "Últimos 7 dias", "Últimos 30 dias", "Este Mês", "Personalizado"],
+        key="filtro_periodo"
+    )
+
+    hoje = date.today()
+    intervalo_personalizado = st.date_input("Escolha o período (se personalizado):", value=(hoje - timedelta(days=7), hoje), key="filtro_intervalo")
+
+    btn_aplicar_filtros = st.form_submit_button("✅ Aplicar Filtros", use_container_width=True)
+
+# Lógica das datas
 data_inicio = None
 data_fim = None
-hoje = date.today()
 
 if opcao_periodo == "Hoje":
     data_inicio = hoje
@@ -234,9 +237,8 @@ elif opcao_periodo == "Este Mês":
     data_inicio = hoje.replace(day=1)
     data_fim = hoje
 elif opcao_periodo == "Personalizado":
-    intervalo = st.sidebar.date_input("Escolha o período:", value=(hoje - timedelta(days=7), hoje))
-    if isinstance(intervalo, tuple) and len(intervalo) == 2:
-        data_inicio, data_fim = intervalo
+    if isinstance(intervalo_personalizado, tuple) and len(intervalo_personalizado) == 2:
+        data_inicio, data_fim = intervalo_personalizado
 
 # --- EXECUÇÃO E FILTRAGEM ---
 with st.spinner("Puxando dados das planilhas em paralelo..."):
@@ -257,7 +259,6 @@ else:
         return None
 
     def checar_referencia_valida(row):
-        """Aceita qualquer valor na coluna REFERÊNCIA (incluindo SEM REF)."""
         if "REFERÊNCIA" in row:
             val = str(row["REFERÊNCIA"]).strip().replace('"', '')
             return val != "" and val.lower() not in ["none", "nan", "null"]
@@ -344,7 +345,6 @@ else:
     colunas_ordenadas = ["REFERÊNCIA", "IMPORTADOR", "DIGITADOR", "STATUS", "ENVIO P/ DIGITAÇÃO", "DATA ATUALIZAÇÃO", "ORIGEM"]
     colunas_finais = [col for col in colunas_ordenadas if col in df_exibir.columns]
 
-    # GARANTE QUE APENAS DUPLICATAS 100% IDÊNTICAS EM TODAS AS COLUNAS MENCIONADAS SEJAM DESECARTADAS
     df_exibir_final = df_exibir[colunas_finais].drop_duplicates()
 
     st.dataframe(
