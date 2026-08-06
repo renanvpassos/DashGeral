@@ -191,18 +191,26 @@ def processar_planilhas_otimizado(urls):
 # --- BARRA LATERAL (PAINEL DE CONTROLE) ---
 st.sidebar.header("⚙️ Painel de Controle")
 
-# Callback para recarregar dados e resetar filtros no session_state
+# Valores padrão inicializados no Session State se não existirem
+if "filtro_status" not in st.session_state:
+    st.session_state["filtro_status"] = "AGUARDANDO DIGITAÇÃO"
+if "filtro_periodo" not in st.session_state:
+    st.session_state["filtro_periodo"] = "Hoje"
+if "filtro_intervalo" not in st.session_state:
+    st.session_state["filtro_intervalo"] = (date.today() - timedelta(days=7), date.today())
+
+# Callback para recarregar dados e resetar filtros ao estado padrão
 def recarregar_e_resetar():
     st.cache_data.clear()
     st.session_state["filtro_status"] = "AGUARDANDO DIGITAÇÃO"
-    st.session_state["filtro_periodo"] = "Todo o tempo"
+    st.session_state["filtro_periodo"] = "Hoje"
     st.session_state["filtro_intervalo"] = (date.today() - timedelta(days=7), date.today())
 
 st.sidebar.button("🔄 Recarregar Dados Agora", on_click=recarregar_e_resetar, type="primary")
 
 st.sidebar.markdown("---")
 
-# Formulário para agrupar os filtros e só aplicar após o clique do usuário
+# Formulário para agrupar os filtros e só aplicar após a confirmação
 with st.sidebar.form(key="form_filtros"):
     st.subheader("🔍 Filtros de Busca")
     
@@ -211,12 +219,17 @@ with st.sidebar.form(key="form_filtros"):
 
     opcao_periodo = st.selectbox(
         "Selecione o intervalo:",
-        ["Todo o tempo", "Hoje", "Últimos 7 dias", "Últimos 30 dias", "Este Mês", "Personalizado"],
+        ["Hoje", "Últimos 7 dias", "Últimos 30 dias", "Este Mês", "Todo o tempo", "Personalizado"],
         key="filtro_periodo"
     )
 
     hoje = date.today()
-    intervalo_personalizado = st.date_input("Escolha o período (se personalizado):", value=(hoje - timedelta(days=7), hoje), key="filtro_intervalo")
+    
+    # Exibe o seletor de datas APENAS se "Personalizado" estiver selecionado
+    if opcao_periodo == "Personalizado":
+        intervalo_personalizado = st.date_input("Escolha o período (se personalizado):", value=(hoje - timedelta(days=7), hoje), key="filtro_intervalo")
+    else:
+        intervalo_personalizado = None
 
     btn_aplicar_filtros = st.form_submit_button("✅ Aplicar Filtros", use_container_width=True)
 
