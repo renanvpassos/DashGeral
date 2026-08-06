@@ -27,6 +27,7 @@ PLANILHAS_URLS = [
     "https://docs.google.com/spreadsheets/d/1Q0BMTebNMSEyGqTwuQjy2r6nLeSNQE7oIhEntpUhQAA/edit?gid=0#gid=0", #SALVADOR LENNON
     "https://docs.google.com/spreadsheets/d/10P8YgNIqxox-MqDA63DnO5yKAueAQ5GgJONDH2fu9-8/edit?gid=0#gid=0", #RIO LENNON
     "https://docs.google.com/spreadsheets/d/1gNeE9CY8KLaI7DOajWFJcGmZ-UuS4ME8firbFkovNS4/edit?usp=sharing", #ABB
+    "https://docs.google.com/spreadsheets/d/1b2ayiTIX36gcyG953M-Z2fxt4c8Q6SOrnQEcCeAlJwA/edit?usp=sharing", #CARLA, EMILY, RAYANE
 ]
 
 def extrair_spreadsheet_id(url):
