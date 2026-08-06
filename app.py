@@ -7,7 +7,7 @@ from google.oauth2.service_account import Credentials
 st.set_page_config(page_title="Monitor de Etapas de Trabalho", layout="wide")
 st.title("📊 Monitor de Etapas de Trabalho")
 
-# Função de conexão
+# Conexão via Secrets do Streamlit Cloud
 @st.cache_resource
 def conectar_google_sheets():
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -21,8 +21,10 @@ except Exception:
     st.error("Erro ao conectar com as credenciais do Google Sheets. Verifique os Secrets.")
     st.stop()
 
+# Adicione aqui todas as URLs das suas planilhas
 PLANILHAS_URLS = [
     "https://docs.google.com/spreadsheets/d/1ym-kHhuaW1pD5KNXzrmgY2QaUSol339R4fCHdGRS3K8/edit?usp=sharing",
+    # "https://docs.google.com/spreadsheets/d/OUTRA_PLANILHA/edit",
 ]
 
 def normalizar_texto(texto):
@@ -32,12 +34,26 @@ def normalizar_texto(texto):
     texto = unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode('utf-8')
     return texto.strip().upper()
 
+def renomear_duplicadas(colunas):
+    """Trata colunas duplicadas adicionando sufixo incremental: STATUS, STATUS_2, STATUS_3..."""
+    vistos = {}
+    novas_colunas = []
+    for col in colunas:
+        col_clean = col.strip()
+        if col_clean in vistos:
+            vistos[col_clean] += 1
+            novas_colunas.append(f"{col_clean}_{vistos[col_clean]}")
+        else:
+            vistos[col_clean] = 1
+            novas_colunas.append(col_clean)
+    return novas_colunas
+
 @st.cache_data(ttl=300)
 def processar_planilhas(urls):
     dados_totais = []
 
-    # Dicionário mapeando o nome padronizado para o nome final desejado
-    colunas_alvo = {
+    # Lista de termos chave para identificar as colunas desejadas
+    alvos = {
         "REFERENCIA": "REFERÊNCIA",
         "DIGITADOR": "DIGITADOR",
         "STATUS": "STATUS",
@@ -55,9 +71,9 @@ def processar_planilhas(urls):
                 if not rows or len(rows) < 2:
                     continue
 
-                # 1. Encontra a linha do cabeçalho (procura por STATUS ou REFERENCIA nas 10 primeiras linhas)
+                # 1. Localiza a linha do cabeçalho
                 header_idx = -1
-                for i, row in enumerate(rows[:10]):
+                for i, row in enumerate(rows[:15]):
                     row_norm = [normalizar_texto(cell) for cell in row]
                     if any("STATUS" in cell for cell in row_norm) or any("REFERENCIA" in cell for cell in row_norm):
                         header_idx = i
@@ -66,97 +82,94 @@ def processar_planilhas(urls):
                 if header_idx == -1:
                     continue
 
-                # 2. Cria o DataFrame
                 raw_header = rows[header_idx]
-                df = pd.DataFrame(rows[header_idx + 1:], columns=raw_header)
+                data_rows = rows[header_idx + 1:]
 
-                # --- CORREÇÃO DO ERRO ---
-                # Remove colunas com nomes exatamente iguais (mantém apenas a primeira ocorrência)
-                df = df.loc[:, ~df.columns.duplicated()].copy()
+                # 2. Renomeia colunas duplicadas no cabeçalho original
+                header_renomeado = renomear_duplicadas(raw_header)
+                df = pd.DataFrame(data_rows, columns=header_renomeado)
 
-                # 3. Mapeamento das colunas encontradas
+                # 3. Mapeia e identifica todas as colunas de interesse
                 col_map = {}
-                for col_original in df.columns:
-                    col_norm = normalizar_texto(col_original)
-                    for chave_norm, nome_final in colunas_alvo.items():
-                        if chave_norm in col_norm and nome_final not in col_map.values():
-                            col_map[col_original] = nome_final
+                for col_orig in df.columns:
+                    col_norm = normalizar_texto(col_orig)
+                    for chave_norm, nome_padrao in alvos.items():
+                        if chave_norm in col_norm:
+                            # Preserva a informação se for duplicada (ex: STATUS_2)
+                            sufixo = col_orig.replace(col_orig.split('_')[0], '') if '_' in col_orig else ''
+                            col_map[col_orig] = f"{nome_padrao}{sufixo}"
                             break
 
-                if "STATUS" in col_map.values():
+                if col_map:
                     df = df.rename(columns=col_map)
                     
                     # Seleciona apenas as colunas mapeadas
-                    colunas_presentes = [c for c in list(set(colunas_alvo.values())) if c in df.columns]
-                    df_filtrado = df[colunas_presentes].copy()
-
-                    # Adiciona origem
+                    cols_para_manter = list(col_map.values())
+                    df_filtrado = df[cols_para_manter].copy()
+                    
+                    # Adiciona origem (Nome do arquivo + Aba)
                     df_filtrado["ORIGEM"] = f"{doc.title} - {worksheet.title}"
-                    
-                    # Garante que STATUS seja tratado como Series (1 única coluna)
-                    status_col = df_filtrado["STATUS"]
-                    if isinstance(status_col, pd.DataFrame):
-                        status_col = status_col.iloc[:, 0]
-
-                    # Filtra linhas onde o status não seja vazio
-                    df_filtrado = df_filtrado[status_col.astype(str).str.strip() != ""]
-                    
                     dados_totais.append(df_filtrado)
 
         except Exception as err:
-            st.warning(f"Erro ao processar a planilha {url}: {err}")
+            st.warning(f"Aviso ao ler a planilha ({url}): {err}")
 
     if dados_totais:
-        # Combina os DataFrames e remove colunas duplicadas resultantes do concat se houver
-        df_final = pd.concat(dados_totais, ignore_index=True)
-        return df_final.loc[:, ~df_final.columns.duplicated()]
+        # Junta todas as tabelas de todas as abas e planilhas
+        return pd.concat(dados_totais, ignore_index=True, sort=False)
     return pd.DataFrame()
 
-# Processamento dos dados
-with st.spinner("Lendo e cruzando dados das planilhas..."):
+# Executa o carregamento dos dados
+with st.spinner("Lendo todas as planilhas e consolidando colunas..."):
     df_completo = processar_planilhas(PLANILHAS_URLS)
 
 if df_completo.empty:
-    st.info("Nenhum dado encontrado. Certifique-se de que as planilhas contêm colunas com 'STATUS' ou 'REFERÊNCIA'.")
+    st.info("Nenhum dado localizado. Verifique os links das planilhas ou se os cabeçalhos contêm os termos de busca.")
 else:
-    # Garante que a coluna STATUS seja tratada corretamente como Series
-    status_series = df_completo["STATUS"]
-    if isinstance(status_series, pd.DataFrame):
-        status_series = status_series.iloc[:, 0]
+    # Identifica todas as colunas referentes ao STATUS (ex: STATUS, STATUS_2, etc.)
+    cols_status = [c for c in df_completo.columns if "STATUS" in c]
 
-    # Cria coluna de status normalizada
-    df_completo["STATUS_NORM"] = status_series.apply(normalizar_texto)
+    # Função para verificar se algum dos status da linha corresponde ao filtro
+    def checar_status_linha(row, termo):
+        for col in cols_status:
+            val = normalizar_texto(row[col])
+            if termo in val:
+                return True
+        return False
 
-    # Métricas
+    # Filtros para contagem das métricas
+    em_dig = df_completo[df_completo.apply(lambda r: checar_status_linha(r, "EM DIGITA"), axis=1)]
+    digitado = df_completo[df_completo.apply(lambda r: checar_status_linha(r, "DIGITADO") and not checar_status_linha(r, "EM DIGITA"), axis=1)]
+    finalizado = df_completo[df_completo.apply(lambda r: checar_status_linha(r, "FINALIZAD"), axis=1)]
+
+    # Métricas gerais no topo
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total de Registros", len(df_completo))
-    c2.metric("Em Digitação", len(df_completo[df_completo["STATUS_NORM"].str.contains("EM DIGITA", na=False)]))
-    c3.metric("Digitado", len(df_completo[df_completo["STATUS_NORM"].str.contains("DIGITADO", na=False) & ~df_completo["STATUS_NORM"].str.contains("EM DIGITA", na=False)]))
-    c4.metric("Finalizado", len(df_completo[df_completo["STATUS_NORM"].str.contains("FINALIZAD", na=False)]))
+    c1.metric("Total Registros", len(df_completo))
+    c2.metric("Em Digitação", len(em_dig))
+    c3.metric("Digitado", len(digitado))
+    c4.metric("Finalizado", len(finalizado))
 
     st.markdown("---")
 
-    # Filtro de Status na barra lateral
-    status_opcoes = ["TODOS", "EM DIGITAÇÃO", "DIGITADO", "FINALIZADO"]
-    status_selecionado = st.sidebar.selectbox("Filtrar por Status:", status_opcoes, index=1)
+    # Menu lateral
+    status_selecionado = st.sidebar.selectbox("Filtrar por Status:", ["EM DIGITAÇÃO", "DIGITADO", "FINALIZADO", "TODOS"], index=0)
 
     if status_selecionado == "EM DIGITAÇÃO":
-        df_exibir = df_completo[df_completo["STATUS_NORM"].str.contains("EM DIGITA", na=False)]
+        df_exibir = em_dig
     elif status_selecionado == "DIGITADO":
-        df_exibir = df_completo[df_completo["STATUS_NORM"].str.contains("DIGITADO", na=False) & ~df_completo["STATUS_NORM"].str.contains("EM DIGITA", na=False)]
+        df_exibir = digitado
     elif status_selecionado == "FINALIZADO":
-        df_exibir = df_completo[df_completo["STATUS_NORM"].str.contains("FINALIZAD", na=False)]
+        df_exibir = finalizado
     else:
         df_exibir = df_completo
 
-    st.subheader(f"📌 Registros - {status_selecionado}")
+    st.subheader(f"📌 Registros Encontrados - {status_selecionado}")
 
-    # Colunas em ordem de preferência
-    colunas_ordenadas = ["ORIGEM", "REFERÊNCIA", "IMPORTADOR", "DIGITADOR", "STATUS", "ENVIO P/ DIGITAÇÃO", "DATA ATUALIZAÇÃO"]
-    colunas_finais = [col for col in colunas_ordenadas if col in df_exibir.columns]
+    # Remove linhas completamente vazias no DataFrame de exibição
+    df_exibir = df_exibir.dropna(how="all")
 
     st.dataframe(
-        df_exibir[colunas_finais],
+        df_exibir,
         use_container_width=True,
         hide_index=True
     )
