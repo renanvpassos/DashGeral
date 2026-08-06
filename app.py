@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import gspread
 import unicodedata
+import time
 from datetime import datetime, date, timedelta
 from google.oauth2.service_account import Credentials
 
@@ -51,7 +52,9 @@ def renomear_duplicadas(colunas):
             novas_colunas.append(col_clean)
     return novas_colunas
 
-def processar_planilhas_em_tempo_real(urls):
+# Cache de 60 segundos evita exceder a cota de leitura por minuto da API do Google
+@st.cache_data(ttl=60, show_spinner=False)
+def processar_planilhas_com_cache(urls):
     dados_totais = []
 
     alvos = {
@@ -104,6 +107,9 @@ def processar_planilhas_em_tempo_real(urls):
                     df_filtrado["ORIGEM"] = f"{doc.title} - {worksheet.title}"
                     dados_totais.append(df_filtrado)
 
+                # Pequena pausa estratégica para evitar rajada de chamadas na API
+                time.sleep(0.1)
+
         except Exception as err:
             st.warning(f"Aviso ao ler a planilha ({url}): {err}")
 
@@ -114,16 +120,16 @@ def processar_planilhas_em_tempo_real(urls):
 # --- BARRA LATERAL (PAINEL DE CONTROLE) ---
 st.sidebar.header("⚙️ Painel de Controle")
 
+# Botão força a limpeza do cache e reexecuta a busca no Google Sheets
 if st.sidebar.button("🔄 Recarregar Dados Agora"):
+    st.cache_data.clear()
     st.rerun()
 
-# 1. Filtro por Status
 status_opcoes = ["AGUARDANDO DIGITAÇÃO", "EM DIGITAÇÃO", "DIGITADO", "FINALIZADO", "TODOS"]
 status_selecionado = st.sidebar.selectbox("Filtrar por Status:", status_opcoes, index=0)
 
 st.sidebar.markdown("---")
 
-# 2. Filtro por Período
 st.sidebar.subheader("📅 Período")
 opcao_periodo = st.sidebar.selectbox(
     "Selecione o intervalo:",
@@ -153,13 +159,12 @@ elif opcao_periodo == "Personalizado":
         data_inicio, data_fim = intervalo
 
 # --- EXECUÇÃO E FILTRAGEM ---
-with st.spinner("Puxando dados atualizados do Google Sheets..."):
-    df_completo = processar_planilhas_em_tempo_real(PLANILHAS_URLS)
+with st.spinner("Puxando dados das planilhas..."):
+    df_completo = processar_planilhas_com_cache(PLANILHAS_URLS)
 
 if df_completo.empty:
-    st.info("Nenhum dado localizado. Verifique se as planilhas contêm os termos de busca no cabeçalho.")
+    st.info("Nenhum dado localizado ou limite de requisições atingido. Tente clicar em Recarregar em alguns instantes.")
 else:
-    # Função auxiliar para tratar datas por coluna
     def extrair_data_coluna(val):
         val_str = str(val).strip()
         if val_str:
@@ -169,12 +174,10 @@ else:
                 return None
         return None
 
-    # Identifica colunas específicas
     cols_status = [c for c in df_completo.columns if "STATUS" in c]
     cols_data_atualizacao = [c for c in df_completo.columns if "DATA ATUALIZAÇÃO" in c]
     cols_envio_digitacao = [c for c in df_completo.columns if "ENVIO P/ DIGITAÇÃO" in c]
 
-    # Funções de verificação de linha
     def checar_status_vazio(row):
         for col in cols_status:
             val = str(row[col]).strip()
@@ -197,7 +200,6 @@ else:
                     return dt
         return None
 
-    # Aplicação da regra de período conforme a fonte de data especificada
     def filtrar_por_periodo(df, col_fonte_data):
         if opcao_periodo == "Todo o tempo" or not data_inicio or not data_fim:
             return df
@@ -205,28 +207,25 @@ else:
         datas_ref = df.apply(lambda r: extrair_data_ref(r, col_fonte_data), axis=1)
         return df[(datas_ref >= data_inicio) & (datas_ref <= data_fim)]
 
-    # ---------------- LÓGICA DE CADA STATUS ----------------
-    
-    # 1. AGUARDANDO DIGITAÇÃO (Status Vazio + Data de Referência: ENVIO P/ DIGITAÇÃO)
+    # 1. AGUARDANDO DIGITAÇÃO (Status Vazio + Ref: ENVIO P/ DIGITAÇÃO)
     df_aguardando = df_completo[df_completo.apply(checar_status_vazio, axis=1)]
     df_aguardando_filtrado = filtrar_por_periodo(df_aguardando, cols_envio_digitacao)
 
-    # 2. EM DIGITAÇÃO (Data de Referência: DATA ATUALIZAÇÃO)
+    # 2. EM DIGITAÇÃO (Ref: DATA ATUALIZAÇÃO)
     df_em_dig = df_completo[df_completo.apply(lambda r: checar_status_termo(r, "EM DIGITA"), axis=1)]
     df_em_dig_filtrado = filtrar_por_periodo(df_em_dig, cols_data_atualizacao)
 
-    # 3. DIGITADO (Data de Referência: DATA ATUALIZAÇÃO)
+    # 3. DIGITADO (Ref: DATA ATUALIZAÇÃO)
     df_digitado = df_completo[df_completo.apply(lambda r: checar_status_termo(r, "DIGITADO") and not checar_status_termo(r, "EM DIGITA"), axis=1)]
     df_digitado_filtrado = filtrar_por_periodo(df_digitado, cols_data_atualizacao)
 
-    # 4. FINALIZADO (Data de Referência: DATA ATUALIZAÇÃO)
+    # 4. FINALIZADO (Ref: DATA ATUALIZAÇÃO)
     df_finalizado = df_completo[df_completo.apply(lambda r: checar_status_termo(r, "FINALIZAD"), axis=1)]
     df_finalizado_filtrado = filtrar_por_periodo(df_finalizado, cols_data_atualizacao)
 
-    # Total geral do período (soma dos recortes por período)
     total_registros_periodo = len(df_aguardando_filtrado) + len(df_em_dig_filtrado) + len(df_digitado_filtrado) + len(df_finalizado_filtrado)
 
-    # --- MÉTRICAS REATIVAS (ATUALIZAM DE ACORDO COM CADA REGRA) ---
+    # METRICAS
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Aguardando", len(df_aguardando_filtrado))
     c2.metric("Em Digitação", len(df_em_dig_filtrado))
@@ -236,7 +235,6 @@ else:
 
     st.markdown("---")
 
-    # Seleção da tabela de exibição
     if status_selecionado == "AGUARDANDO DIGITAÇÃO":
         df_exibir = df_aguardando_filtrado
     elif status_selecionado == "EM DIGITAÇÃO":
@@ -248,7 +246,6 @@ else:
     else:
         df_exibir = pd.concat([df_aguardando_filtrado, df_em_dig_filtrado, df_digitado_filtrado, df_finalizado_filtrado], ignore_index=True)
 
-    # Título dinâmico
     txt_periodo = f"({data_inicio.strftime('%d/%m/%Y')} até {data_fim.strftime('%d/%m/%Y')})" if data_inicio and data_fim and opcao_periodo != "Todo o tempo" else "(Todo o tempo)"
     st.subheader(f"📌 Registros - {status_selecionado} {txt_periodo}")
 
