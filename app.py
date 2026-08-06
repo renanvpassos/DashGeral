@@ -175,8 +175,17 @@ else:
         return None
 
     cols_status = [c for c in df_completo.columns if "STATUS" in c]
+    cols_ref = [c for c in df_completo.columns if "REFERÊNCIA" in c]
     cols_data_atualizacao = [c for c in df_completo.columns if "DATA ATUALIZAÇÃO" in c]
     cols_envio_digitacao = [c for c in df_completo.columns if "ENVIO P/ DIGITAÇÃO" in c]
+
+    # Validação de Referência Preenchida
+    def checar_referencia_preenchida(row):
+        for col in cols_ref:
+            val = str(row[col]).strip()
+            if val != "" and val.lower() not in ["none", "nan", "null"]:
+                return True
+        return False
 
     def checar_status_vazio(row):
         for col in cols_status:
@@ -200,26 +209,25 @@ else:
                     return dt
         return None
 
-    # Função atualizada para EXCLUIR linhas onde a data é None/vazia
     def filtrar_por_periodo(df, col_fonte_data):
         if df.empty:
             return df
 
-        # Extrai a data de referência para cada linha
         datas_ref = df.apply(lambda r: extrair_data_ref(r, col_fonte_data), axis=1)
-
-        # Filtro 1: A data DEVE existir (não ser None)
         mascara_data_valida = datas_ref.notnull()
 
-        # Filtro 2: Se houver intervalo selecionado, aplica o range de datas
         if opcao_periodo != "Todo o tempo" and data_inicio and data_fim:
             mascara_periodo = (datas_ref >= data_inicio) & (datas_ref <= data_fim)
             return df[mascara_data_valida & mascara_periodo]
 
         return df[mascara_data_valida]
 
-    # 1. AGUARDANDO DIGITAÇÃO (Exige data em ENVIO P/ DIGITAÇÃO)
-    df_aguardando = df_completo[df_completo.apply(checar_status_vazio, axis=1)]
+    # 1. AGUARDANDO DIGITAÇÃO
+    # Regra 1 (Nova): Ter algo preenchido na coluna REFERÊNCIA
+    df_com_ref = df_completo[df_completo.apply(checar_referencia_preenchida, axis=1)]
+    # Regra 2: Status Vazio
+    df_aguardando = df_com_ref[df_com_ref.apply(checar_status_vazio, axis=1)]
+    # Regra 3: Data ENVIO P/ DIGITAÇÃO preenchida e no período
     df_aguardando_filtrado = filtrar_por_periodo(df_aguardando, cols_envio_digitacao)
 
     # 2. EM DIGITAÇÃO (Exige data em DATA ATUALIZAÇÃO)
