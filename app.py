@@ -28,8 +28,8 @@ except Exception as e:
 
 # 3. Lista de URLs das planilhas (pode vir de um input do usuário ou de um arquivo)
 PLANILHAS_URLS = [
-    "https://docs.google.com/spreadsheets/d/SEU_ID_DA_PLANILHA_1/edit",
-    "https://docs.google.com/spreadsheets/d/SEU_ID_DA_PLANILHA_2/edit",
+    "https://docs.google.com/spreadsheets/d/1zRkVSttkkpqekEdXjGPlz3-Dl7NzgqnkbGioJGuAdRY/edit?usp=sharing",
+    "https://docs.google.com/spreadsheets/d/1ym-kHhuaW1pD5KNXzrmgY2QaUSol339R4fCHdGRS3K8/edit?usp=sharing",
 ]
 
 @st.cache_data(ttl=300)  # Reutiliza o cache por 5 minutos
