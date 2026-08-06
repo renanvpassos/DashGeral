@@ -5,6 +5,7 @@ import unicodedata
 import time
 from datetime import datetime, date, timedelta
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError
 
 st.set_page_config(page_title="Monitor de Etapas de Trabalho", layout="wide")
 st.title("📊 Monitor de Etapas de Trabalho")
@@ -29,7 +30,6 @@ PLANILHAS_URLS = [
     "https://docs.google.com/spreadsheets/d/1uJzArQ8oF19s2yYQD3BFoNeaZW_xPMdD1RvdSIWnGR8/edit?usp=sharing", #VALERIA
     "https://docs.google.com/spreadsheets/d/1Q0BMTebNMSEyGqTwuQjy2r6nLeSNQE7oIhEntpUhQAA/edit?gid=0#gid=0", #SALVADOR LENNON
     "https://docs.google.com/spreadsheets/d/10P8YgNIqxox-MqDA63DnO5yKAueAQ5GgJONDH2fu9-8/edit?gid=0#gid=0", #RIO LENNON
-    "https://docs.google.com/spreadsheets/d/1gNeE9CY8KLaI7DOajWFJcGmZ-UuS4ME8firbFkovNS4/edit?gid=0#gid=0", #ABB
 ]
 
 def normalizar_texto(texto):
@@ -53,8 +53,20 @@ def renomear_duplicadas(colunas):
             novas_colunas.append(col_clean)
     return novas_colunas
 
-# Cache de 60 segundos para evitar erro 429 de cota da API
-@st.cache_data(ttl=60, show_spinner=False)
+def obter_valores_com_retry(worksheet, max_retries=3, delay=5):
+    """Função com Retry para lidar com o erro 429 de cota excedida."""
+    for attempt in range(max_retries):
+        try:
+            return worksheet.get_all_values()
+        except APIError as e:
+            if "429" in str(e) and attempt < max_retries - 1:
+                time.sleep(delay * (attempt + 1)) # Espera 5s, depois 10s...
+            else:
+                raise e
+    return []
+
+# Cache aumentado para 300 segundos (5 minutos) para evitar estourar cota do Google
+@st.cache_data(ttl=300, show_spinner=False)
 def processar_planilhas_com_cache(urls):
     dados_totais = []
 
@@ -71,8 +83,10 @@ def processar_planilhas_com_cache(urls):
     for url in urls:
         try:
             doc = client.open_by_url(url)
-            for worksheet in doc.worksheets():
-                rows = worksheet.get_all_values()
+            worksheets = doc.worksheets()
+            
+            for worksheet in worksheets:
+                rows = obter_valores_com_retry(worksheet)
                 if not rows or len(rows) < 2:
                     continue
 
@@ -108,7 +122,8 @@ def processar_planilhas_com_cache(urls):
                     df_filtrado["ORIGEM"] = f"{doc.title} - {worksheet.title}"
                     dados_totais.append(df_filtrado)
 
-                time.sleep(0.1)
+                # Pausa de 0.2s entre cada aba para não exceder a cota por segundo
+                time.sleep(0.2)
 
         except Exception as err:
             st.warning(f"Aviso ao ler a planilha ({url}): {err}")
@@ -224,22 +239,19 @@ else:
         return df[mascara_data_valida]
 
     # 1. AGUARDANDO DIGITAÇÃO
-    # Regra 1 (Nova): Ter algo preenchido na coluna REFERÊNCIA
     df_com_ref = df_completo[df_completo.apply(checar_referencia_preenchida, axis=1)]
-    # Regra 2: Status Vazio
     df_aguardando = df_com_ref[df_com_ref.apply(checar_status_vazio, axis=1)]
-    # Regra 3: Data ENVIO P/ DIGITAÇÃO preenchida e no período
     df_aguardando_filtrado = filtrar_por_periodo(df_aguardando, cols_envio_digitacao)
 
-    # 2. EM DIGITAÇÃO (Exige data em DATA ATUALIZAÇÃO)
+    # 2. EM DIGITAÇÃO
     df_em_dig = df_completo[df_completo.apply(lambda r: checar_status_termo(r, "EM DIGITA"), axis=1)]
     df_em_dig_filtrado = filtrar_por_periodo(df_em_dig, cols_data_atualizacao)
 
-    # 3. DIGITADO (Exige data em DATA ATUALIZAÇÃO)
+    # 3. DIGITADO
     df_digitado = df_completo[df_completo.apply(lambda r: checar_status_termo(r, "DIGITADO") and not checar_status_termo(r, "EM DIGITA"), axis=1)]
     df_digitado_filtrado = filtrar_por_periodo(df_digitado, cols_data_atualizacao)
 
-    # 4. FINALIZADO (Exige data em DATA ATUALIZAÇÃO)
+    # 4. FINALIZADO
     df_finalizado = df_completo[df_completo.apply(lambda r: checar_status_termo(r, "FINALIZAD"), axis=1)]
     df_finalizado_filtrado = filtrar_por_periodo(df_finalizado, cols_data_atualizacao)
 
