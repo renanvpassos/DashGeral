@@ -4,6 +4,7 @@ import requests
 import unicodedata
 import io
 from datetime import date, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.oauth2.service_account import Credentials
 import google.auth.transport.requests
 
@@ -79,6 +80,93 @@ def unificar_colunas_mesmo_nome(df):
 
     return df_consolidado
 
+def processar_aba(sheet, sheet_id, headers, alvos):
+    """Processa uma aba individual de uma planilha."""
+    title = sheet["properties"]["title"]
+    sheet_id_gid = sheet["properties"]["sheetId"]
+
+    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={sheet_id_gid}"
+    try:
+        resp_csv = requests.get(csv_url, headers=headers, timeout=10)
+        if resp_csv.status_code != 200:
+            return None
+
+        content = resp_csv.content.decode('utf-8', errors='ignore')
+        lines = content.splitlines()
+
+        if len(lines) < 2:
+            return None
+
+        rows = [line.split(',') for line in lines]
+
+        header_idx = -1
+        for i, row in enumerate(rows[:15]):
+            row_norm = [normalizar_texto(cell.replace('"', '')) for cell in row]
+            if any("STATUS" in cell for cell in row_norm) or any("REFERENCIA" in cell for cell in row_norm):
+                header_idx = i
+                break
+
+        if header_idx == -1:
+            return None
+
+        csv_data = "\n".join(lines[header_idx:])
+        df = pd.read_csv(io.StringIO(csv_data), dtype=str, on_bad_lines='skip')
+
+        if df.empty:
+            return None
+
+        col_map = {}
+        for col_orig in df.columns:
+            col_norm = normalizar_texto(col_orig)
+            for chave_norm, nome_padrao in alvos.items():
+                if chave_norm in col_norm:
+                    col_map[col_orig] = nome_padrao
+                    break
+
+        if col_map:
+            df_filtrado = df[list(col_map.keys())].copy()
+            
+            novas_cols = []
+            contagem = {}
+            for col in col_map.values():
+                if col not in contagem:
+                    contagem[col] = 1
+                    novas_cols.append(col)
+                else:
+                    contagem[col] += 1
+                    novas_cols.append(f"{col}_{contagem[col]}")
+            
+            df_filtrado.columns = novas_cols
+            df_filtrado = unificar_colunas_mesmo_nome(df_filtrado)
+            df_filtrado["ORIGEM"] = f"{sheet_id} - {title}"
+            return df_filtrado
+    except Exception:
+        return None
+    return None
+
+def processar_planilha_unica(url, headers, alvos):
+    """Obtém os metadados de uma planilha e processa suas abas em paralelo."""
+    sheet_id = extrair_spreadsheet_id(url)
+    meta_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}?fields=sheets.properties"
+    try:
+        resp_meta = requests.get(meta_url, headers=headers, timeout=10)
+        if resp_meta.status_code != 200:
+            return []
+
+        sheets_info = resp_meta.json().get("sheets", [])
+        dfs_planilha = []
+
+        # Processamento paralelo de todas as abas da planilha
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(processar_aba, sheet, sheet_id, headers, alvos) for sheet in sheets_info]
+            for future in as_completed(futures):
+                res = future.result()
+                if res is not None and not res.empty:
+                    dfs_planilha.append(res)
+        return dfs_planilha
+    except Exception:
+        return []
+
 # Cache de 120 segundos
 @st.cache_data(ttl=120, show_spinner=False)
 def processar_planilhas_otimizado(urls):
@@ -96,76 +184,13 @@ def processar_planilhas_otimizado(urls):
         "ENVIO PARA DIGITACAO": "ENVIO P/ DIGITAÇÃO"
     }
 
-    for url in urls:
-        sheet_id = extrair_spreadsheet_id(url)
-        meta_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}?fields=sheets.properties"
-        resp_meta = requests.get(meta_url, headers=headers)
-        
-        if resp_meta.status_code != 200:
-            st.warning(f"Não foi possível acessar a planilha ID: {sheet_id}")
-            continue
-
-        sheets_info = resp_meta.json().get("sheets", [])
-
-        for sheet in sheets_info:
-            title = sheet["properties"]["title"]
-            sheet_id_gid = sheet["properties"]["sheetId"]
-
-            csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={sheet_id_gid}"
-            resp_csv = requests.get(csv_url, headers=headers)
-
-            if resp_csv.status_code != 200:
-                continue
-
-            content = resp_csv.content.decode('utf-8', errors='ignore')
-            lines = content.splitlines()
-
-            if len(lines) < 2:
-                continue
-
-            rows = [line.split(',') for line in lines]
-
-            header_idx = -1
-            for i, row in enumerate(rows[:15]):
-                row_norm = [normalizar_texto(cell.replace('"', '')) for cell in row]
-                if any("STATUS" in cell for cell in row_norm) or any("REFERENCIA" in cell for cell in row_norm):
-                    header_idx = i
-                    break
-
-            if header_idx == -1:
-                continue
-
-            csv_data = "\n".join(lines[header_idx:])
-            df = pd.read_csv(io.StringIO(csv_data), dtype=str, on_bad_lines='skip')
-
-            if df.empty:
-                continue
-
-            col_map = {}
-            for col_orig in df.columns:
-                col_norm = normalizar_texto(col_orig)
-                for chave_norm, nome_padrao in alvos.items():
-                    if chave_norm in col_norm:
-                        col_map[col_orig] = nome_padrao
-                        break
-
-            if col_map:
-                df_filtrado = df[list(col_map.keys())].copy()
-                
-                novas_cols = []
-                contagem = {}
-                for col in col_map.values():
-                    if col not in contagem:
-                        contagem[col] = 1
-                        novas_cols.append(col)
-                    else:
-                        contagem[col] += 1
-                        novas_cols.append(f"{col}_{contagem[col]}")
-                
-                df_filtrado.columns = novas_cols
-                df_filtrado = unificar_colunas_mesmo_nome(df_filtrado)
-                df_filtrado["ORIGEM"] = f"{sheet_id} - {title}"
-                dados_totais.append(df_filtrado)
+    # Processamento paralelo de TODAS as planilhas simultaneamente
+    with ThreadPoolExecutor(max_workers=len(urls)) as executor:
+        futures = [executor.submit(processar_planilha_unica, url, headers, alvos) for url in urls]
+        for future in as_completed(futures):
+            res_dfs = future.result()
+            if res_dfs:
+                dados_totais.extend(res_dfs)
 
     if dados_totais:
         df_concat = pd.concat(dados_totais, ignore_index=True, sort=False)
@@ -214,7 +239,7 @@ elif opcao_periodo == "Personalizado":
         data_inicio, data_fim = intervalo
 
 # --- EXECUÇÃO E FILTRAGEM ---
-with st.spinner("Puxando dados das planilhas de forma otimizada..."):
+with st.spinner("Puxando dados das planilhas em paralelo..."):
     df_completo = processar_planilhas_otimizado(PLANILHAS_URLS)
 
 if df_completo.empty:
