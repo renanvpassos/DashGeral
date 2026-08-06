@@ -11,7 +11,7 @@ import google.auth.transport.requests
 st.set_page_config(page_title="Monitor de Etapas de Trabalho", layout="wide")
 st.title("📊 Monitor de Etapas de Trabalho")
 
-# Obtém Token de Acesso da Service Account para ler planilhas privadas via HTTP sem estourar cota da API GSpread
+# Obtém Token de Acesso da Service Account
 @st.cache_resource
 def obter_access_token():
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -31,20 +31,18 @@ PLANILHAS_URLS = [
 ]
 
 def extrair_spreadsheet_id(url):
-    """Extrai o ID da planilha a partir da URL."""
     if "/d/" in url:
         return url.split("/d/")[1].split("/")[0]
     return url
 
 def normalizar_texto(texto):
-    """Remove acentos, espaços extras e converte para maiúsculas."""
     if not isinstance(texto, str):
         texto = str(texto)
     texto = unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode('utf-8')
     return texto.strip().upper()
 
 def renomear_duplicadas(colunas):
-    """Trata colunas duplicadas adicionando sufixo incremental: STATUS, STATUS_2..."""
+    """Garante que todas as colunas tenham nomes únicos."""
     vistos = {}
     novas_colunas = []
     for col in colunas:
@@ -57,7 +55,7 @@ def renomear_duplicadas(colunas):
             novas_colunas.append(col_clean)
     return novas_colunas
 
-# Cache de 120 segundos para manter performance fluida
+# Cache de 120 segundos
 @st.cache_data(ttl=120, show_spinner=False)
 def processar_planilhas_otimizado(urls):
     dados_totais = []
@@ -76,8 +74,6 @@ def processar_planilhas_otimizado(urls):
 
     for url in urls:
         sheet_id = extrair_spreadsheet_id(url)
-        
-        # 1. Busca metadados das abas (1 única requisição HTTP leve por arquivo)
         meta_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}?fields=sheets.properties"
         resp_meta = requests.get(meta_url, headers=headers)
         
@@ -91,21 +87,18 @@ def processar_planilhas_otimizado(urls):
             title = sheet["properties"]["title"]
             sheet_id_gid = sheet["properties"]["sheetId"]
 
-            # 2. Exportação direta em CSV (Não consome a quota de Read Requests por minuto do gspread)
             csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={sheet_id_gid}"
             resp_csv = requests.get(csv_url, headers=headers)
 
             if resp_csv.status_code != 200:
                 continue
 
-            # Carrega os dados em memória usando Pandas
             content = resp_csv.content.decode('utf-8', errors='ignore')
             lines = content.splitlines()
 
             if len(lines) < 2:
                 continue
 
-            # Converte em matriz de texto pura para identificar o cabeçalho
             rows = [line.split(',') for line in lines]
 
             header_idx = -1
@@ -118,13 +111,13 @@ def processar_planilhas_otimizado(urls):
             if header_idx == -1:
                 continue
 
-            # Lê o CSV a partir da linha do cabeçalho
             csv_data = "\n".join(lines[header_idx:])
             df = pd.read_csv(io.StringIO(csv_data), dtype=str, on_bad_lines='skip')
 
             if df.empty:
                 continue
 
+            # 1. Trata colunas duplicadas do CSV original
             df.columns = renomear_duplicadas(df.columns)
 
             col_map = {}
@@ -140,6 +133,10 @@ def processar_planilhas_otimizado(urls):
                 df = df.rename(columns=col_map)
                 cols_para_manter = list(col_map.values())
                 df_filtrado = df[cols_para_manter].copy()
+                
+                # CORREÇÃO DO ERRO: Garante que o DataFrame recortado não tenha colunas com nomes idênticos
+                df_filtrado.columns = renomear_duplicadas(df_filtrado.columns)
+                
                 df_filtrado["ORIGEM"] = f"{sheet_id} - {title}"
                 dados_totais.append(df_filtrado)
 
@@ -252,7 +249,7 @@ else:
 
         return df[mascara_data_valida]
 
-    # 1. AGUARDANDO DIGITAÇÃO (Regra: Referência Preenchida + Status Vazio + Data Envio Preenchida)
+    # 1. AGUARDANDO DIGITAÇÃO
     df_com_ref = df_completo[df_completo.apply(checar_referencia_preenchida, axis=1)]
     df_aguardando = df_com_ref[df_com_ref.apply(checar_status_vazio, axis=1)]
     df_aguardando_filtrado = filtrar_por_periodo(df_aguardando, cols_envio_digitacao)
