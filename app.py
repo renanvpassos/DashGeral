@@ -3,8 +3,7 @@ import pandas as pd
 import requests
 import unicodedata
 import io
-import time
-from datetime import datetime, date, timedelta
+from datetime import date, timedelta
 from google.oauth2.service_account import Credentials
 import google.auth.transport.requests
 
@@ -41,19 +40,43 @@ def normalizar_texto(texto):
     texto = unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode('utf-8')
     return texto.strip().upper()
 
-def renomear_duplicadas(colunas):
-    """Garante que todas as colunas tenham nomes únicos."""
-    vistos = {}
-    novas_colunas = []
-    for col in colunas:
-        col_clean = str(col).strip()
-        if col_clean in vistos:
-            vistos[col_clean] += 1
-            novas_colunas.append(f"{col_clean}_{vistos[col_clean]}")
+def consolidar_colunas_duplicadas(df):
+    """
+    Agrupa colunas que possuem o mesmo nome base (ex: vários 'STATUS' ou 'IMPORTADOR')
+    e combina seus valores linha a linha, mantendo apenas 1 coluna final para cada campo.
+    """
+    if df.empty:
+        return df
+
+    # Identifica nomes base removendo sufixos numéricos (ex: STATUS_1 -> STATUS)
+    cols_base = {}
+    for col in df.columns:
+        if col == "ORIGEM":
+            continue
+        nome_base = col.split('_')[0] if '_' in col and col.split('_')[-1].isdigit() else col
+        if nome_base not in cols_base:
+            cols_base[nome_base] = []
+        cols_base[nome_base].append(col)
+
+    df_consolidado = pd.DataFrame(index=df.index)
+
+    for nome_base, lista_cols in cols_base.items():
+        if len(lista_cols) == 1:
+            df_consolidado[nome_base] = df[lista_cols[0]]
         else:
-            vistos[col_clean] = 1
-            novas_colunas.append(col_clean)
-    return novas_colunas
+            # Se houver mais de uma coluna com o mesmo nome, combina pegando o primeiro valor preenchido
+            def pegar_primeiro_valido(row):
+                for c in lista_cols:
+                    val = str(row[c]).strip().replace('"', '')
+                    if val != "" and val.lower() not in ["none", "nan", "null"]:
+                        return row[c]
+                return ""
+            df_consolidado[nome_base] = df.apply(pegar_primeiro_valido, axis=1)
+
+    if "ORIGEM" in df.columns:
+        df_consolidado["ORIGEM"] = df["ORIGEM"]
+
+    return df_consolidado
 
 # Cache de 120 segundos
 @st.cache_data(ttl=120, show_spinner=False)
@@ -117,31 +140,40 @@ def processar_planilhas_otimizado(urls):
             if df.empty:
                 continue
 
-            # 1. Trata colunas duplicadas do CSV original
-            df.columns = renomear_duplicadas(df.columns)
-
             col_map = {}
             for col_orig in df.columns:
                 col_norm = normalizar_texto(col_orig)
                 for chave_norm, nome_padrao in alvos.items():
                     if chave_norm in col_norm:
-                        sufixo = col_orig.replace(col_orig.split('_')[0], '') if '_' in col_orig else ''
-                        col_map[col_orig] = f"{nome_padrao}{sufixo}"
+                        col_map[col_orig] = nome_padrao
                         break
 
             if col_map:
-                df = df.rename(columns=col_map)
-                cols_para_manter = list(col_map.values())
-                df_filtrado = df[cols_para_manter].copy()
+                # Seleciona as colunas desejadas e renomeia
+                df_filtrado = df[list(col_map.keys())].copy()
                 
-                # CORREÇÃO DO ERRO: Garante que o DataFrame recortado não tenha colunas com nomes idênticos
-                df_filtrado.columns = renomear_duplicadas(df_filtrado.columns)
+                # Gera sufixos temporários para colunas do mesmo tipo para evitar colisão inicial
+                novas_cols = []
+                contagem = {}
+                for col in col_map.values():
+                    if col not in contagem:
+                        contagem[col] = 1
+                        novas_cols.append(col)
+                    else:
+                        contagem[col] += 1
+                        novas_cols.append(f"{col}_{contagem[col]}")
                 
+                df_filtrado.columns = novas_cols
+
+                # Unifica todas as colunas duplicadas em 1 única coluna por tipo
+                df_filtrado = consolidar_colunas_duplicadas(df_filtrado)
+
                 df_filtrado["ORIGEM"] = f"{sheet_id} - {title}"
                 dados_totais.append(df_filtrado)
 
     if dados_totais:
-        return pd.concat(dados_totais, ignore_index=True, sort=False)
+        df_concat = pd.concat(dados_totais, ignore_index=True, sort=False)
+        return consolidar_colunas_duplicadas(df_concat)
     return pd.DataFrame()
 
 # --- BARRA LATERAL (PAINEL DE CONTROLE) ---
@@ -202,42 +234,31 @@ else:
                 return None
         return None
 
-    cols_status = [c for c in df_completo.columns if "STATUS" in c]
-    cols_ref = [c for c in df_completo.columns if "REFERÊNCIA" in c]
-    cols_data_atualizacao = [c for c in df_completo.columns if "DATA ATUALIZAÇÃO" in c]
-    cols_envio_digitacao = [c for c in df_completo.columns if "ENVIO P/ DIGITAÇÃO" in c]
-
     def checar_referencia_preenchida(row):
-        for col in cols_ref:
-            val = str(row[col]).strip().replace('"', '')
-            if val != "" and val.lower() not in ["none", "nan", "null"]:
-                return True
+        if "REFERÊNCIA" in row:
+            val = str(row["REFERÊNCIA"]).strip().replace('"', '')
+            return val != "" and val.lower() not in ["none", "nan", "null"]
         return False
 
     def checar_status_vazio(row):
-        for col in cols_status:
-            val = str(row[col]).strip().replace('"', '')
-            if val != "" and val.lower() not in ["none", "nan"]:
-                return False
+        if "STATUS" in row:
+            val = str(row["STATUS"]).strip().replace('"', '')
+            return val == "" or val.lower() in ["none", "nan"]
         return True
 
     def checar_status_termo(row, termo):
-        for col in cols_status:
-            val = normalizar_texto(row[col])
-            if termo in val:
-                return True
+        if "STATUS" in row:
+            val = normalizar_texto(row["STATUS"])
+            return termo in val
         return False
 
-    def extrair_data_ref(row, col_list):
-        for c in col_list:
-            if c in row:
-                dt = extrair_data_coluna(row[c])
-                if dt:
-                    return dt
+    def extrair_data_ref(row, col_nome):
+        if col_nome in row:
+            return extrair_data_coluna(row[col_nome])
         return None
 
     def filtrar_por_periodo(df, col_fonte_data):
-        if df.empty:
+        if df.empty or col_fonte_data not in df.columns:
             return df
 
         datas_ref = df.apply(lambda r: extrair_data_ref(r, col_fonte_data), axis=1)
@@ -249,26 +270,26 @@ else:
 
         return df[mascara_data_valida]
 
-    # 1. AGUARDANDO DIGITAÇÃO
+    # 1. AGUARDANDO DIGITAÇÃO (Referência Preenchida + Status Vazio + Data Envio Preenchida)
     df_com_ref = df_completo[df_completo.apply(checar_referencia_preenchida, axis=1)]
     df_aguardando = df_com_ref[df_com_ref.apply(checar_status_vazio, axis=1)]
-    df_aguardando_filtrado = filtrar_por_periodo(df_aguardando, cols_envio_digitacao)
+    df_aguardando_filtrado = filtrar_por_periodo(df_aguardando, "ENVIO P/ DIGITAÇÃO")
 
     # 2. EM DIGITAÇÃO
     df_em_dig = df_completo[df_completo.apply(lambda r: checar_status_termo(r, "EM DIGITA"), axis=1)]
-    df_em_dig_filtrado = filtrar_por_periodo(df_em_dig, cols_data_atualizacao)
+    df_em_dig_filtrado = filtrar_por_periodo(df_em_dig, "DATA ATUALIZAÇÃO")
 
     # 3. DIGITADO
     df_digitado = df_completo[df_completo.apply(lambda r: checar_status_termo(r, "DIGITADO") and not checar_status_termo(r, "EM DIGITA"), axis=1)]
-    df_digitado_filtrado = filtrar_por_periodo(df_digitado, cols_data_atualizacao)
+    df_digitado_filtrado = filtrar_por_periodo(df_digitado, "DATA ATUALIZAÇÃO")
 
     # 4. FINALIZADO
     df_finalizado = df_completo[df_completo.apply(lambda r: checar_status_termo(r, "FINALIZAD"), axis=1)]
-    df_finalizado_filtrado = filtrar_por_periodo(df_finalizado, cols_data_atualizacao)
+    df_finalizado_filtrado = filtrar_por_periodo(df_finalizado, "DATA ATUALIZAÇÃO")
 
     total_registros_periodo = len(df_aguardando_filtrado) + len(df_em_dig_filtrado) + len(df_digitado_filtrado) + len(df_finalizado_filtrado)
 
-    # METRICAS
+    # MÉTRICAS
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Aguardando", len(df_aguardando_filtrado))
     c2.metric("Em Digitação", len(df_em_dig_filtrado))
@@ -294,8 +315,12 @@ else:
 
     df_exibir_clean = df_exibir.dropna(how="all")
 
+    # Garante a ordem limpa e exata das colunas principais na exibição
+    colunas_ordenadas = ["REFERÊNCIA", "IMPORTADOR", "DIGITADOR", "STATUS", "ENVIO P/ DIGITAÇÃO", "DATA ATUALIZAÇÃO", "ORIGEM"]
+    colunas_finais = [col for col in colunas_ordenadas if col in df_exibir_clean.columns]
+
     st.dataframe(
-        df_exibir_clean,
+        df_exibir_clean[colunas_finais],
         use_container_width=True,
         hide_index=True
     )
