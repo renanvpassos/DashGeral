@@ -40,10 +40,10 @@ def normalizar_texto(texto):
     texto = unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode('utf-8')
     return texto.strip().upper()
 
-def consolidar_colunas_duplicadas(df):
+def unificar_colunas_mesmo_nome(df):
     """
-    Agrupa colunas que possuem o mesmo nome base (ex: vários 'STATUS' ou 'IMPORTADOR')
-    e combina seus valores linha a linha, mantendo apenas 1 coluna final para cada campo.
+    Combina apenas as COLUNAS duplicadas da mesma aba (ex: STATUS_1, STATUS_2)
+    sem excluir nenhuma LINHA da planilha.
     """
     if df.empty:
         return df
@@ -160,13 +160,13 @@ def processar_planilhas_otimizado(urls):
                         novas_cols.append(f"{col}_{contagem[col]}")
                 
                 df_filtrado.columns = novas_cols
-                df_filtrado = consolidar_colunas_duplicadas(df_filtrado)
+                df_filtrado = unificar_colunas_mesmo_nome(df_filtrado)
                 df_filtrado["ORIGEM"] = f"{sheet_id} - {title}"
                 dados_totais.append(df_filtrado)
 
     if dados_totais:
-        df_concat = pd.concat(dados_totais, ignore_index=True, sort=False)
-        return consolidar_colunas_duplicadas(df_concat)
+        # Junta todas as abas e planilhas preservando 100% de todas as linhas (sem descarte de duplicatas)
+        return pd.concat(dados_totais, ignore_index=True, sort=False)
     return pd.DataFrame()
 
 # --- BARRA LATERAL (PAINEL DE CONTROLE) ---
@@ -228,7 +228,7 @@ else:
         return None
 
     def checar_referencia_valida(row):
-        """Aceita qualquer texto preenchido na referência, inclusive 'SEM REF' ou variações."""
+        """Considera válida qualquer linha que possua texto na coluna REFERÊNCIA (incluindo SEM REF)."""
         if "REFERÊNCIA" in row:
             val = str(row["REFERÊNCIA"]).strip().replace('"', '')
             return val != "" and val.lower() not in ["none", "nan", "null"]
@@ -264,7 +264,7 @@ else:
 
         return df[mascara_data_valida]
 
-    # 1. AGUARDANDO DIGITAÇÃO (Possui Referência/SEM REF + Status Vazio + Data Envio Preenchida)
+    # 1. AGUARDANDO DIGITAÇÃO
     df_com_ref = df_completo[df_completo.apply(checar_referencia_valida, axis=1)]
     df_aguardando = df_com_ref[df_com_ref.apply(checar_status_vazio, axis=1)]
     df_aguardando_filtrado = filtrar_por_periodo(df_aguardando, "ENVIO P/ DIGITAÇÃO")
@@ -307,6 +307,7 @@ else:
     txt_periodo = f"({data_inicio.strftime('%d/%m/%Y')} até {data_fim.strftime('%d/%m/%Y')})" if data_inicio and data_fim and opcao_periodo != "Todo o tempo" else "(Com data preenchida)"
     st.subheader(f"📌 Registros - {status_selecionado} {txt_periodo}")
 
+    # Remove apenas linhas onde ABSOLUTAMENTE TODAS as colunas são nulas/vazias
     df_exibir_clean = df_exibir.dropna(how="all")
 
     colunas_ordenadas = ["REFERÊNCIA", "IMPORTADOR", "DIGITADOR", "STATUS", "ENVIO P/ DIGITAÇÃO", "DATA ATUALIZAÇÃO", "ORIGEM"]
