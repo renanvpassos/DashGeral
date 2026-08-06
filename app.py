@@ -199,59 +199,81 @@ if "filtro_periodo" not in st.session_state:
 if "filtro_intervalo" not in st.session_state:
     st.session_state["filtro_intervalo"] = (date.today() - timedelta(days=7), date.today())
 
+# Estado dos filtros efetivamente aplicados na busca
+if "aplicado_status" not in st.session_state:
+    st.session_state["aplicado_status"] = st.session_state["filtro_status"]
+if "aplicado_periodo" not in st.session_state:
+    st.session_state["aplicado_periodo"] = st.session_state["filtro_periodo"]
+if "aplicado_intervalo" not in st.session_state:
+    st.session_state["aplicado_intervalo"] = st.session_state["filtro_intervalo"]
+
 # Callback para recarregar dados e resetar filtros ao estado padrão
 def recarregar_e_resetar():
     st.cache_data.clear()
     st.session_state["filtro_status"] = "AGUARDANDO DIGITAÇÃO"
     st.session_state["filtro_periodo"] = "Hoje"
     st.session_state["filtro_intervalo"] = (date.today() - timedelta(days=7), date.today())
+    
+    st.session_state["aplicado_status"] = "AGUARDANDO DIGITAÇÃO"
+    st.session_state["aplicado_periodo"] = "Hoje"
+    st.session_state["aplicado_intervalo"] = st.session_state["filtro_intervalo"]
 
 st.sidebar.button("🔄 Recarregar Dados Agora", on_click=recarregar_e_resetar, type="primary")
 
 st.sidebar.markdown("---")
 
-# Formulário para agrupar os filtros e só aplicar após a confirmação
-with st.sidebar.form(key="form_filtros"):
-    st.subheader("🔍 Filtros de Busca")
-    
-    status_opcoes = ["AGUARDANDO DIGITAÇÃO", "EM DIGITAÇÃO", "DIGITADO", "FINALIZADO", "TODOS"]
-    status_selecionado = st.selectbox("Filtrar por Status:", status_opcoes, key="filtro_status")
+st.sidebar.subheader("🔍 Filtros de Busca")
 
-    opcao_periodo = st.selectbox(
-        "Selecione o intervalo:",
-        ["Hoje", "Últimos 7 dias", "Últimos 30 dias", "Este Mês", "Todo o tempo", "Personalizado"],
-        key="filtro_periodo"
+status_opcoes = ["AGUARDANDO DIGITAÇÃO", "EM DIGITAÇÃO", "DIGITADO", "FINALIZADO", "TODOS"]
+st.sidebar.selectbox("Filtrar por Status:", status_opcoes, key="filtro_status")
+
+opcao_periodo = st.sidebar.selectbox(
+    "Selecione o intervalo:",
+    ["Hoje", "Últimos 7 dias", "Últimos 30 dias", "Este Mês", "Todo o tempo", "Personalizado"],
+    key="filtro_periodo"
+)
+
+hoje = date.today()
+
+# Exibe o seletor de datas em formato BR (DD/MM/YYYY) imediatamente ao selecionar "Personalizado"
+if opcao_periodo == "Personalizado":
+    st.sidebar.date_input(
+        "Escolha o período:",
+        value=(hoje - timedelta(days=7), hoje),
+        format="DD/MM/YYYY",
+        key="filtro_intervalo"
     )
 
-    hoje = date.today()
-    
-    # Exibe o seletor de datas APENAS se "Personalizado" estiver selecionado
-    if opcao_periodo == "Personalizado":
-        intervalo_personalizado = st.date_input("Escolha o período (se personalizado):", value=(hoje - timedelta(days=7), hoje), key="filtro_intervalo")
-    else:
-        intervalo_personalizado = None
+# Botão para confirmar e aplicar os filtros escolhidos de uma vez
+if st.sidebar.button("✅ Aplicar Filtros", use_container_width=True):
+    st.session_state["aplicado_status"] = st.session_state["filtro_status"]
+    st.session_state["aplicado_periodo"] = st.session_state["filtro_periodo"]
+    st.session_state["aplicado_intervalo"] = st.session_state.get("filtro_intervalo", (hoje - timedelta(days=7), hoje))
 
-    btn_aplicar_filtros = st.form_submit_button("✅ Aplicar Filtros", use_container_width=True)
+# Variáveis que governam a filtragem ativa
+status_selecionado = st.session_state["aplicado_status"]
+periodo_ativo = st.session_state["aplicado_periodo"]
+intervalo_ativo = st.session_state["aplicado_intervalo"]
 
-# Lógica das datas
+# Lógica das datas aplicadas
 data_inicio = None
 data_fim = None
 
-if opcao_periodo == "Hoje":
+if periodo_ativo == "Hoje":
     data_inicio = hoje
     data_fim = hoje
-elif opcao_periodo == "Últimos 7 dias":
+elif periodo_ativo == "Últimos 7 dias":
     data_inicio = hoje - timedelta(days=7)
     data_fim = hoje
-elif opcao_periodo == "Últimos 30 dias":
+elif periodo_ativo == "Últimos 30 dias":
     data_inicio = hoje - timedelta(days=30)
     data_fim = hoje
-elif opcao_periodo == "Este Mês":
+elif periodo_ativo == "Este Mês":
     data_inicio = hoje.replace(day=1)
     data_fim = hoje
-elif opcao_periodo == "Personalizado":
-    if isinstance(intervalo_personalizado, tuple) and len(intervalo_personalizado) == 2:
-        data_inicio, data_fim = intervalo_personalizado
+elif periodo_ativo == "Personalizado":
+    if isinstance(intervalo_ativo, tuple) and len(intervalo_ativo) == 2:
+        data_inicio, data_fim = intervalo_ativo
 
 # --- EXECUÇÃO E FILTRAGEM ---
 with st.spinner("Puxando dados das planilhas em paralelo..."):
@@ -298,7 +320,7 @@ else:
         if df.empty or col_fonte_data not in df.columns:
             return df
 
-        if opcao_periodo == "Todo o tempo":
+        if periodo_ativo == "Todo o tempo":
             return df
 
         datas_ref = df.apply(lambda r: extrair_data_ref(r, col_fonte_data), axis=1)
@@ -351,7 +373,7 @@ else:
     else:
         df_exibir = pd.concat([df_aguardando_filtrado, df_em_dig_filtrado, df_digitado_filtrado, df_finalizado_filtrado], ignore_index=True)
 
-    txt_periodo = f"({data_inicio.strftime('%d/%m/%Y')} até {data_fim.strftime('%d/%m/%Y')})" if data_inicio and data_fim and opcao_periodo != "Todo o tempo" else ""
+    txt_periodo = f"({data_inicio.strftime('%d/%m/%Y')} até {data_fim.strftime('%d/%m/%Y')})" if data_inicio and data_fim and periodo_ativo != "Todo o tempo" else ""
     st.subheader(f"📌 Registros - {status_selecionado} {txt_periodo}")
 
     # ORDENAÇÃO DE COLUNAS
