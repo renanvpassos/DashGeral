@@ -48,7 +48,6 @@ def consolidar_colunas_duplicadas(df):
     if df.empty:
         return df
 
-    # Identifica nomes base removendo sufixos numéricos (ex: STATUS_1 -> STATUS)
     cols_base = {}
     for col in df.columns:
         if col == "ORIGEM":
@@ -64,7 +63,6 @@ def consolidar_colunas_duplicadas(df):
         if len(lista_cols) == 1:
             df_consolidado[nome_base] = df[lista_cols[0]]
         else:
-            # Se houver mais de uma coluna com o mesmo nome, combina pegando o primeiro valor preenchido
             def pegar_primeiro_valido(row):
                 for c in lista_cols:
                     val = str(row[c]).strip().replace('"', '')
@@ -149,10 +147,8 @@ def processar_planilhas_otimizado(urls):
                         break
 
             if col_map:
-                # Seleciona as colunas desejadas e renomeia
                 df_filtrado = df[list(col_map.keys())].copy()
                 
-                # Gera sufixos temporários para colunas do mesmo tipo para evitar colisão inicial
                 novas_cols = []
                 contagem = {}
                 for col in col_map.values():
@@ -164,10 +160,7 @@ def processar_planilhas_otimizado(urls):
                         novas_cols.append(f"{col}_{contagem[col]}")
                 
                 df_filtrado.columns = novas_cols
-
-                # Unifica todas as colunas duplicadas em 1 única coluna por tipo
                 df_filtrado = consolidar_colunas_duplicadas(df_filtrado)
-
                 df_filtrado["ORIGEM"] = f"{sheet_id} - {title}"
                 dados_totais.append(df_filtrado)
 
@@ -234,7 +227,8 @@ else:
                 return None
         return None
 
-    def checar_referencia_preenchida(row):
+    def checar_referencia_valida(row):
+        """Aceita qualquer texto preenchido na referência, inclusive 'SEM REF' ou variações."""
         if "REFERÊNCIA" in row:
             val = str(row["REFERÊNCIA"]).strip().replace('"', '')
             return val != "" and val.lower() not in ["none", "nan", "null"]
@@ -270,8 +264,8 @@ else:
 
         return df[mascara_data_valida]
 
-    # 1. AGUARDANDO DIGITAÇÃO (Referência Preenchida + Status Vazio + Data Envio Preenchida)
-    df_com_ref = df_completo[df_completo.apply(checar_referencia_preenchida, axis=1)]
+    # 1. AGUARDANDO DIGITAÇÃO (Possui Referência/SEM REF + Status Vazio + Data Envio Preenchida)
+    df_com_ref = df_completo[df_completo.apply(checar_referencia_valida, axis=1)]
     df_aguardando = df_com_ref[df_com_ref.apply(checar_status_vazio, axis=1)]
     df_aguardando_filtrado = filtrar_por_periodo(df_aguardando, "ENVIO P/ DIGITAÇÃO")
 
@@ -315,7 +309,6 @@ else:
 
     df_exibir_clean = df_exibir.dropna(how="all")
 
-    # Garante a ordem limpa e exata das colunas principais na exibição
     colunas_ordenadas = ["REFERÊNCIA", "IMPORTADOR", "DIGITADOR", "STATUS", "ENVIO P/ DIGITAÇÃO", "DATA ATUALIZAÇÃO", "ORIGEM"]
     colunas_finais = [col for col in colunas_ordenadas if col in df_exibir_clean.columns]
 
