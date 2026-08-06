@@ -1,28 +1,25 @@
 import streamlit as st
 import pandas as pd
-import gspread
+import requests
 import unicodedata
+import io
 import time
 from datetime import datetime, date, timedelta
 from google.oauth2.service_account import Credentials
-from gspread.exceptions import APIError
+import google.auth.transport.requests
 
 st.set_page_config(page_title="Monitor de Etapas de Trabalho", layout="wide")
 st.title("📊 Monitor de Etapas de Trabalho")
 
-# Conexão com Google Sheets
+# Obtém Token de Acesso da Service Account para ler planilhas privadas via HTTP sem estourar cota da API GSpread
 @st.cache_resource
-def conectar_google_sheets():
+def obter_access_token():
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     credentials_info = st.secrets["gcp_service_account"]
     credentials = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-    return gspread.authorize(credentials)
-
-try:
-    client = conectar_google_sheets()
-except Exception:
-    st.error("Erro ao conectar com as credenciais do Google Sheets. Verifique os Secrets.")
-    st.stop()
+    request = google.auth.transport.requests.Request()
+    credentials.refresh(request)
+    return credentials.token
 
 PLANILHAS_URLS = [
     "https://docs.google.com/spreadsheets/d/1ym-kHhuaW1pD5KNXzrmgY2QaUSol339R4fCHdGRS3K8/edit?usp=sharing", #ROCHE
@@ -30,7 +27,14 @@ PLANILHAS_URLS = [
     "https://docs.google.com/spreadsheets/d/1uJzArQ8oF19s2yYQD3BFoNeaZW_xPMdD1RvdSIWnGR8/edit?usp=sharing", #VALERIA
     "https://docs.google.com/spreadsheets/d/1Q0BMTebNMSEyGqTwuQjy2r6nLeSNQE7oIhEntpUhQAA/edit?gid=0#gid=0", #SALVADOR LENNON
     "https://docs.google.com/spreadsheets/d/10P8YgNIqxox-MqDA63DnO5yKAueAQ5GgJONDH2fu9-8/edit?gid=0#gid=0", #RIO LENNON
+    "https://docs.google.com/spreadsheets/d/1gNeE9CY8KLaI7DOajWFJcGmZ-UuS4ME8firbFkovNS4/edit?usp=sharing", #ABB
 ]
+
+def extrair_spreadsheet_id(url):
+    """Extrai o ID da planilha a partir da URL."""
+    if "/d/" in url:
+        return url.split("/d/")[1].split("/")[0]
+    return url
 
 def normalizar_texto(texto):
     """Remove acentos, espaços extras e converte para maiúsculas."""
@@ -44,7 +48,7 @@ def renomear_duplicadas(colunas):
     vistos = {}
     novas_colunas = []
     for col in colunas:
-        col_clean = col.strip()
+        col_clean = str(col).strip()
         if col_clean in vistos:
             vistos[col_clean] += 1
             novas_colunas.append(f"{col_clean}_{vistos[col_clean]}")
@@ -53,22 +57,12 @@ def renomear_duplicadas(colunas):
             novas_colunas.append(col_clean)
     return novas_colunas
 
-def obter_valores_com_retry(worksheet, max_retries=3, delay=5):
-    """Função com Retry para lidar com o erro 429 de cota excedida."""
-    for attempt in range(max_retries):
-        try:
-            return worksheet.get_all_values()
-        except APIError as e:
-            if "429" in str(e) and attempt < max_retries - 1:
-                time.sleep(delay * (attempt + 1)) # Espera 5s, depois 10s...
-            else:
-                raise e
-    return []
-
-# Cache aumentado para 300 segundos (5 minutos) para evitar estourar cota do Google
-@st.cache_data(ttl=300, show_spinner=False)
-def processar_planilhas_com_cache(urls):
+# Cache de 120 segundos para manter performance fluida
+@st.cache_data(ttl=120, show_spinner=False)
+def processar_planilhas_otimizado(urls):
     dados_totais = []
+    token = obter_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
 
     alvos = {
         "REFERENCIA": "REFERÊNCIA",
@@ -81,52 +75,73 @@ def processar_planilhas_com_cache(urls):
     }
 
     for url in urls:
-        try:
-            doc = client.open_by_url(url)
-            worksheets = doc.worksheets()
-            
-            for worksheet in worksheets:
-                rows = obter_valores_com_retry(worksheet)
-                if not rows or len(rows) < 2:
-                    continue
+        sheet_id = extrair_spreadsheet_id(url)
+        
+        # 1. Busca metadados das abas (1 única requisição HTTP leve por arquivo)
+        meta_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}?fields=sheets.properties"
+        resp_meta = requests.get(meta_url, headers=headers)
+        
+        if resp_meta.status_code != 200:
+            st.warning(f"Não foi possível acessar a planilha ID: {sheet_id}")
+            continue
 
-                header_idx = -1
-                for i, row in enumerate(rows[:15]):
-                    row_norm = [normalizar_texto(cell) for cell in row]
-                    if any("STATUS" in cell for cell in row_norm) or any("REFERENCIA" in cell for cell in row_norm):
-                        header_idx = i
+        sheets_info = resp_meta.json().get("sheets", [])
+
+        for sheet in sheets_info:
+            title = sheet["properties"]["title"]
+            sheet_id_gid = sheet["properties"]["sheetId"]
+
+            # 2. Exportação direta em CSV (Não consome a quota de Read Requests por minuto do gspread)
+            csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={sheet_id_gid}"
+            resp_csv = requests.get(csv_url, headers=headers)
+
+            if resp_csv.status_code != 200:
+                continue
+
+            # Carrega os dados em memória usando Pandas
+            content = resp_csv.content.decode('utf-8', errors='ignore')
+            lines = content.splitlines()
+
+            if len(lines) < 2:
+                continue
+
+            # Converte em matriz de texto pura para identificar o cabeçalho
+            rows = [line.split(',') for line in lines]
+
+            header_idx = -1
+            for i, row in enumerate(rows[:15]):
+                row_norm = [normalizar_texto(cell.replace('"', '')) for cell in row]
+                if any("STATUS" in cell for cell in row_norm) or any("REFERENCIA" in cell for cell in row_norm):
+                    header_idx = i
+                    break
+
+            if header_idx == -1:
+                continue
+
+            # Lê o CSV a partir da linha do cabeçalho
+            csv_data = "\n".join(lines[header_idx:])
+            df = pd.read_csv(io.StringIO(csv_data), dtype=str, on_bad_lines='skip')
+
+            if df.empty:
+                continue
+
+            df.columns = renomear_duplicadas(df.columns)
+
+            col_map = {}
+            for col_orig in df.columns:
+                col_norm = normalizar_texto(col_orig)
+                for chave_norm, nome_padrao in alvos.items():
+                    if chave_norm in col_norm:
+                        sufixo = col_orig.replace(col_orig.split('_')[0], '') if '_' in col_orig else ''
+                        col_map[col_orig] = f"{nome_padrao}{sufixo}"
                         break
 
-                if header_idx == -1:
-                    continue
-
-                raw_header = rows[header_idx]
-                data_rows = rows[header_idx + 1:]
-
-                header_renomeado = renomear_duplicadas(raw_header)
-                df = pd.DataFrame(data_rows, columns=header_renomeado)
-
-                col_map = {}
-                for col_orig in df.columns:
-                    col_norm = normalizar_texto(col_orig)
-                    for chave_norm, nome_padrao in alvos.items():
-                        if chave_norm in col_norm:
-                            sufixo = col_orig.replace(col_orig.split('_')[0], '') if '_' in col_orig else ''
-                            col_map[col_orig] = f"{nome_padrao}{sufixo}"
-                            break
-
-                if col_map:
-                    df = df.rename(columns=col_map)
-                    cols_para_manter = list(col_map.values())
-                    df_filtrado = df[cols_para_manter].copy()
-                    df_filtrado["ORIGEM"] = f"{doc.title} - {worksheet.title}"
-                    dados_totais.append(df_filtrado)
-
-                # Pausa de 0.2s entre cada aba para não exceder a cota por segundo
-                time.sleep(0.2)
-
-        except Exception as err:
-            st.warning(f"Aviso ao ler a planilha ({url}): {err}")
+            if col_map:
+                df = df.rename(columns=col_map)
+                cols_para_manter = list(col_map.values())
+                df_filtrado = df[cols_para_manter].copy()
+                df_filtrado["ORIGEM"] = f"{sheet_id} - {title}"
+                dados_totais.append(df_filtrado)
 
     if dados_totais:
         return pd.concat(dados_totais, ignore_index=True, sort=False)
@@ -173,14 +188,14 @@ elif opcao_periodo == "Personalizado":
         data_inicio, data_fim = intervalo
 
 # --- EXECUÇÃO E FILTRAGEM ---
-with st.spinner("Puxando dados das planilhas..."):
-    df_completo = processar_planilhas_com_cache(PLANILHAS_URLS)
+with st.spinner("Puxando dados das planilhas de forma otimizada..."):
+    df_completo = processar_planilhas_otimizado(PLANILHAS_URLS)
 
 if df_completo.empty:
-    st.info("Nenhum dado localizado ou limite de requisições atingido. Tente clicar em Recarregar em alguns instantes.")
+    st.info("Nenhum dado localizado. Verifique se as URLs e abas possuem colunas válidas.")
 else:
     def extrair_data_coluna(val):
-        val_str = str(val).strip()
+        val_str = str(val).strip().replace('"', '')
         if val_str and val_str.lower() not in ["none", "nan", "null"]:
             try:
                 dt = pd.to_datetime(val_str, dayfirst=True, errors='coerce')
@@ -195,18 +210,17 @@ else:
     cols_data_atualizacao = [c for c in df_completo.columns if "DATA ATUALIZAÇÃO" in c]
     cols_envio_digitacao = [c for c in df_completo.columns if "ENVIO P/ DIGITAÇÃO" in c]
 
-    # Validação de Referência Preenchida
     def checar_referencia_preenchida(row):
         for col in cols_ref:
-            val = str(row[col]).strip()
+            val = str(row[col]).strip().replace('"', '')
             if val != "" and val.lower() not in ["none", "nan", "null"]:
                 return True
         return False
 
     def checar_status_vazio(row):
         for col in cols_status:
-            val = str(row[col]).strip()
-            if val != "" and val != "None" and val != "nan":
+            val = str(row[col]).strip().replace('"', '')
+            if val != "" and val.lower() not in ["none", "nan"]:
                 return False
         return True
 
@@ -238,7 +252,7 @@ else:
 
         return df[mascara_data_valida]
 
-    # 1. AGUARDANDO DIGITAÇÃO
+    # 1. AGUARDANDO DIGITAÇÃO (Regra: Referência Preenchida + Status Vazio + Data Envio Preenchida)
     df_com_ref = df_completo[df_completo.apply(checar_referencia_preenchida, axis=1)]
     df_aguardando = df_com_ref[df_com_ref.apply(checar_status_vazio, axis=1)]
     df_aguardando_filtrado = filtrar_por_periodo(df_aguardando, cols_envio_digitacao)
