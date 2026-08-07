@@ -31,6 +31,10 @@ PLANILHAS_URLS = [
     "https://docs.google.com/spreadsheets/d/1mH3TIpm23KkNK-JODDwfd8Igqm1ZtvIeQRUTJAHLZVI/edit?gid=0#gid=0", #KERING
     "https://docs.google.com/spreadsheets/d/1CSX4tQoZsspQ0GmVHuzt5h0ABc28Bdd_DqyPR-rGNns/edit?gid=0#gid=0", #ZARA
     "https://docs.google.com/spreadsheets/d/11xDf-tkye_MeVOh_Re5_Piby9_AdVNv-_TOJyqEk9rQ/edit?usp=sharing", #PRADA
+    "https://docs.google.com/spreadsheets/d/1zgYootR8Dx5arj7O3Mi31nTgUgvr8xpxhatgn5DgPok/edit?usp=sharing", #LOUIS VUITTON
+    "https://docs.google.com/spreadsheets/d/1Xzggnm2N0YizRHUs0V--cr5OZh5ypSbAReEK_iSchT0/edit?gid=0#gid=0", #FASHION DIVERSOS
+    "https://docs.google.com/spreadsheets/d/1Ch3UFNIBYKVm4BF48iB-DjCbcrzUwM0Cl_QG6NB16_4/edit?gid=0#gid=0", #FASHION RAYANE
+    "https://docs.google.com/spreadsheets/d/1Ii3u9yezVPscByz2q33uTGXPCNL64JV5syXArMnPeP0/edit?gid=0#gid=0", #OSGT ADIENT
 ]
 
 def extrair_spreadsheet_id(url):
